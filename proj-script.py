@@ -1222,7 +1222,7 @@ X_lr
 y_lr[:1000]
 
 # %% [markdown]
-# Reweighing with Random Forest
+# #### **Reweighing with Random Forest
 
 # %%
 from aif360.datasets import BinaryLabelDataset
@@ -1426,6 +1426,151 @@ plt.ylabel('Predicted Approval Probability')
 plt.legend(title='Model', loc='upper left')
 plt.tight_layout()
 plt.show()
+
+
+# %% [markdown]
+# #### **Random Forest Threshold change
+
+# %%
+from fairlearn.postprocessing import ThresholdOptimizer
+from sklearn.metrics import accuracy_score, precision_score, recall_score, classification_report
+import numpy as np
+
+# --- Step 1: Get probabilities ---
+# Clean X_test: remove columns added during earlier analysis
+X_test_clean = X_test.drop(columns=['predicted_approval'], errors='ignore')
+
+# Get probabilities using clean test data
+rf_probs = rf_model.predict_proba(X_test_clean)[:, 1]
+y_pred_default = (rf_probs >= 0.5).astype(int)
+
+# --- Step 2: Custom threshold ---
+custom_threshold = 0.4
+y_pred_custom = (rf_probs >= custom_threshold).astype(int)
+
+# --- Step 3: Prepare sensitive feature ---
+# --- Clean Inputs and Align Indexes ---
+X_test_clean = X_test.drop(columns=['predicted_approval'], errors='ignore').reset_index(drop=True)
+y_test_aligned = y_test.reset_index(drop=True)
+sensitive_feature = rf_model_data_4.loc[X_test.index, 'derived_race'].reset_index(drop=True)
+
+
+# Remove rows with missing sensitive values (if any)
+# --- Mask out rows with missing sensitive feature ---
+mask = sensitive_feature.notnull()
+
+X_test_adj = X_test_clean[mask]
+y_test_adj = y_test_aligned[mask]
+sensitive_adj = sensitive_feature[mask].reset_index(drop=True)
+
+# --- Step 4: Fairlearn ThresholdOptimizer ---
+threshold_adjuster = ThresholdOptimizer(
+    estimator=rf_model,
+    constraints="equalized_odds",
+    prefit=True,
+    predict_method='predict_proba'
+)
+
+threshold_adjuster.fit(X_test_adj, y_test_adj, sensitive_features=sensitive_adj)
+y_pred_fair = threshold_adjuster.predict(X_test_adj, sensitive_features=sensitive_adj)
+
+# --- Step 5: Evaluation ---
+def evaluate_model(name, y_true, y_pred):
+    print(f"\n📊 {name} Evaluation")
+    print("Accuracy:", accuracy_score(y_true, y_pred))
+    print("Precision:", precision_score(y_true, y_pred))
+    print("Recall:", recall_score(y_true, y_pred))
+    print("Classification Report:\n", classification_report(y_true, y_pred))
+
+evaluate_model("Original Threshold (0.5)", y_test, y_pred_default)
+evaluate_model(f"Custom Threshold ({custom_threshold})", y_test, y_pred_custom)
+evaluate_model("Fairlearn ThresholdOptimizer", y_test_adj, y_pred_fair)
+
+# --- Step 6: Approval rates ---
+print("\n✅ Approval Rate Comparison:")
+print("Original:", np.mean(y_pred_default))
+print(f"Custom Threshold ({custom_threshold}):", np.mean(y_pred_custom))
+print("Fairlearn Adjusted:", np.mean(y_pred_fair))
+
+
+# %% [markdown]
+# #### **Random Forest Threshold More analysis
+
+# %%
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+from sklearn.metrics import accuracy_score
+
+# --- Setup ---
+thresholds = np.arange(0.2, 0.81, 0.05)
+results = []
+
+# Create sensitive feature labels for DI calc
+sensitive_labels = rf_model_data_4.loc[X_test.index, 'derived_race'].reset_index(drop=True)
+white_group = 'White'
+
+# Clean X_test
+X_test_clean = X_test.drop(columns=['predicted_approval'], errors='ignore').reset_index(drop=True)
+y_test_clean = y_test.reset_index(drop=True)
+
+# Sweep thresholds
+for t in thresholds:
+    y_pred_t = (rf_model.predict_proba(X_test_clean)[:, 1] >= t).astype(int)
+
+    acc = accuracy_score(y_test_clean, y_pred_t)
+    approval_rate = np.mean(y_pred_t)
+    false_positives = ((y_pred_t == 1) & (y_test_clean == 0)).sum()
+    total_negatives = (y_test_clean == 0).sum()
+    fp_rate = false_positives / total_negatives if total_negatives > 0 else np.nan
+
+    # Disparate Impact
+    df = pd.DataFrame({'pred': y_pred_t, 'group': sensitive_labels})
+    group_rates = df.groupby('group')['pred'].mean()
+    di = (group_rates / group_rates.get(white_group)).round(3).to_dict()
+
+    results.append({
+        'Threshold': t,
+        'Accuracy': round(acc, 4),
+        'Approval Rate': round(approval_rate, 4),
+        'False Positive Rate': round(fp_rate, 4),
+        'DI (Black)': di.get('Black or African American', np.nan),
+        'DI (Asian)': di.get('Asian', np.nan),
+    })
+
+# Convert to DataFrame
+results_df = pd.DataFrame(results)
+
+# Display the table
+print("\n📋 Threshold Effects Summary:")
+print(results_df.to_string(index=False))  # Print without index
+
+# --- Plot Metrics ---
+plt.figure(figsize=(12, 6))
+plt.plot(results_df['Threshold'], results_df['Accuracy'], label='Accuracy')
+plt.plot(results_df['Threshold'], results_df['Approval Rate'], label='Approval Rate')
+plt.plot(results_df['Threshold'], results_df['False Positive Rate'], label='False Positive Rate')
+plt.xlabel("Threshold")
+plt.ylabel("Rate")
+plt.title("Model Performance vs. Threshold")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# --- Plot Disparate Impact ---
+plt.figure(figsize=(12, 6))
+plt.plot(results_df['Threshold'], results_df['DI (Black)'], label='DI: Black vs White', marker='o')
+plt.plot(results_df['Threshold'], results_df['DI (Asian)'], label='DI: Asian vs White', marker='o')
+plt.axhline(0.8, color='red', linestyle='--', label='80% Fairness Threshold')
+plt.xlabel("Threshold")
+plt.ylabel("Disparate Impact Ratio")
+plt.title("Disparate Impact vs. Threshold")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
 
 
 
